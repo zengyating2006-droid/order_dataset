@@ -27,7 +27,9 @@ st.markdown("---")
 # 当前程序和 CSV 文件都在 .venv 文件夹中
 # =====================================================
 
-BASE_DIR = Path(r"C:\Users\zengy\ml4biz\.venv")
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
 DATA_PATH = BASE_DIR / "olist_orders_dataset.csv"
 
 
