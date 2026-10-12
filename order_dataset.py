@@ -1,7 +1,10 @@
+# -*- coding: utf-8 -*-
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 from pathlib import Path
+
 
 # =====================================================
 # 1. 页面设置
@@ -20,20 +23,22 @@ st.markdown("---")
 
 
 # =====================================================
-# 2. 自动读取当前文件夹中的 CSV
+# 2. 数据文件路径
+# 当前程序和 CSV 文件都在 .venv 文件夹中
 # =====================================================
 
-BASE_DIR = Path(__file__).resolve().parent
-
+BASE_DIR = Path(r"C:\Users\zengy\ml4biz\.venv")
 DATA_PATH = BASE_DIR / "olist_orders_dataset.csv"
 
 
+# =====================================================
+# 3. 读取数据
+# =====================================================
+
 @st.cache_data
 def load_data(file_path):
-
     data = pd.read_csv(file_path)
 
-    # 日期字段转换
     date_columns = [
         "order_purchase_timestamp",
         "order_approved_at",
@@ -52,40 +57,37 @@ def load_data(file_path):
     return data
 
 
-# 检查文件是否存在
 if not DATA_PATH.exists():
-
-    st.error("找不到订单数据文件！")
+    st.error("没有找到订单数据文件！")
 
     st.write("程序正在寻找：")
-
     st.code(str(DATA_PATH))
 
     st.info(
-        "请确认 app.py 和 "
-        "olist_orders_dataset.csv "
-        "放在同一个文件夹中。"
+        "请确认 olist_orders_dataset.csv "
+        "确实放在 C:\\Users\\zengy\\ml4biz\\.venv 文件夹中。"
     )
 
     st.stop()
 
 
-# 读取数据
-df = load_data(str(DATA_PATH))
+try:
+    df = load_data(str(DATA_PATH))
+
+except Exception as e:
+    st.error("读取 CSV 文件失败。")
+    st.exception(e)
+    st.stop()
 
 
 # =====================================================
-# 3. 检查必要字段
+# 4. 检查必要字段
 # =====================================================
 
 required_columns = [
     "order_id",
-    "customer_id",
     "order_status",
-    "order_purchase_timestamp",
-    "order_delivered_carrier_date",
-    "order_delivered_customer_date",
-    "order_estimated_delivery_date"
+    "order_purchase_timestamp"
 ]
 
 missing_columns = [
@@ -94,204 +96,110 @@ missing_columns = [
 ]
 
 if missing_columns:
-
-    st.error(
-        f"数据文件缺少必要字段：{missing_columns}"
-    )
-
+    st.error("数据集缺少必要字段：" + ", ".join(missing_columns))
     st.stop()
 
 
 # =====================================================
-# 4. 数据清洗
-# =====================================================
-
-# 删除没有订单编号的记录
-df = df.dropna(
-    subset=["order_id"]
-).copy()
-
-# 每个订单只保留一条记录
-df = df.drop_duplicates(
-    subset=["order_id"],
-    keep="first"
-).copy()
-
-# 统一订单状态格式
-df["order_status"] = (
-    df["order_status"]
-    .fillna("unknown")
-    .astype(str)
-    .str.strip()
-    .str.lower()
-)
-
-
-# 原始订单状态中文翻译
-status_translation = {
-    "created": "已创建",
-    "approved": "已批准",
-    "processing": "处理中",
-    "invoiced": "已开票",
-    "shipped": "已发货",
-    "delivered": "已送达",
-    "canceled": "已取消",
-    "unavailable": "不可用",
-    "unknown": "未知状态"
-}
-
-df["原始订单状态"] = (
-    df["order_status"]
-    .map(status_translation)
-    .fillna("其他状态")
-)
-
-
-# =====================================================
-# 5. 订单物流分类
+# 5. 订单状态分类
 # =====================================================
 
 def classify_order(row):
+    status = str(row["order_status"]).strip().lower()
 
-    status = row["order_status"]
+    carrier_date = row.get(
+        "order_delivered_carrier_date",
+        pd.NaT
+    )
 
-    carrier_date = row[
-        "order_delivered_carrier_date"
-    ]
-
-    customer_date = row[
-        "order_delivered_customer_date"
-    ]
+    customer_date = row.get(
+        "order_delivered_customer_date",
+        pd.NaT
+    )
 
     # 已送达
     if status == "delivered":
-
         return "已送达"
 
     # 已取消
-    elif status == "canceled":
-
+    if status == "canceled":
         return "已取消"
 
-    # 不可用
-    elif status == "unavailable":
+    # 商品不可用
+    if status == "unavailable":
+        return "商品不可用"
 
-        return "不可用"
-
-    # 有物流交接时间，但还没有送达记录
-    elif (
-        pd.notna(carrier_date)
-        and pd.isna(customer_date)
-    ):
-
+    # 已发货，尚未送达
+    if pd.notna(carrier_date) and pd.isna(customer_date):
         return "已发货"
 
-    # 原始状态为 shipped
-    elif status == "shipped":
+    # 已送至客户的日期存在，也视为已送达
+    if pd.notna(customer_date):
+        return "已送达"
 
-        return "已发货"
-
-    # 尚未交给物流公司的订单
-    elif status in [
+    # 尚未完成发货的订单
+    if status in [
         "created",
         "approved",
         "processing",
         "invoiced"
     ]:
-
         return "待发货"
 
     # 其他状态
-    else:
-
-        return "其他状态"
+    return "其他状态"
 
 
-df["物流分类"] = df.apply(
-    classify_order,
-    axis=1
-)
+df["物流分类"] = df.apply(classify_order, axis=1)
 
 
 # =====================================================
-# 6. 逾期订单判断
+# 6. 超时订单判断
 # =====================================================
 
-valid_purchase_dates = (
-    df["order_purchase_timestamp"].dropna()
-)
+purchase_col = "order_purchase_timestamp"
+estimated_col = "order_estimated_delivery_date"
+delivered_col = "order_delivered_customer_date"
 
-if valid_purchase_dates.empty:
-
-    default_date = pd.Timestamp.today().date()
-
+if estimated_col in df.columns:
+    df["是否超时"] = (
+        df[estimated_col].notna()
+        & df[delivered_col].isna()
+        & (df[estimated_col] < pd.Timestamp.now())
+        & (~df["物流分类"].isin(["已取消", "商品不可用"]))
+    )
 else:
-
-    default_date = (
-        valid_purchase_dates.max().date()
-    )
+    df["是否超时"] = False
 
 
 # =====================================================
-# 7. 左侧筛选栏
+# 7. 侧边栏筛选
 # =====================================================
 
-st.sidebar.title("🔎 订单查询中心")
+st.sidebar.header("🔎 订单筛选")
 
-reference_date = st.sidebar.date_input(
-    "逾期判断基准日期",
-    value=default_date
-)
-
-reference_timestamp = pd.Timestamp(
-    reference_date
-)
-
-
-# 尚未送达、未取消且超过预计送达日期
-df["是否逾期"] = (
-    df["order_status"].isin([
-        "created",
-        "approved",
-        "processing",
-        "invoiced",
-        "shipped"
-    ])
-    & df["order_estimated_delivery_date"].notna()
-    & (
-        df["order_estimated_delivery_date"]
-        < reference_timestamp
-    )
-)
-
-
-# 选择物流分类
 status_options = [
     "全部",
     "待发货",
     "已发货",
     "已送达",
     "已取消",
-    "不可用",
+    "商品不可用",
     "其他状态"
 ]
 
 selected_status = st.sidebar.selectbox(
-    "选择订单分类",
+    "选择物流状态",
     status_options
 )
 
 
-# 下单日期筛选
-if not valid_purchase_dates.empty:
+# 日期筛选
+valid_dates = df[purchase_col].dropna()
 
-    min_date = (
-        valid_purchase_dates.min().date()
-    )
-
-    max_date = (
-        valid_purchase_dates.max().date()
-    )
+if not valid_dates.empty:
+    min_date = valid_dates.min().date()
+    max_date = valid_dates.max().date()
 
     date_range = st.sidebar.date_input(
         "下单日期范围",
@@ -299,198 +207,112 @@ if not valid_purchase_dates.empty:
         min_value=min_date,
         max_value=max_date
     )
-
 else:
-
-    date_range = (None, None)
-
-
-# 订单编号搜索
-search_order = st.sidebar.text_input(
-    "输入订单编号搜索",
-    placeholder="请输入订单 ID"
-)
+    date_range = None
 
 
-# 逾期订单筛选
-only_overdue = st.sidebar.checkbox(
-    "只查看逾期订单",
+# 超时筛选
+overdue_only = st.sidebar.checkbox(
+    "只看超时订单",
     value=False
 )
 
 
+# 订单编号搜索
+order_keyword = st.sidebar.text_input(
+    "搜索订单编号",
+    placeholder="输入完整或部分订单编号"
+)
+
+
 # =====================================================
-# 8. 根据条件筛选订单
+# 8. 应用筛选条件
 # =====================================================
 
 filtered_df = df.copy()
 
-
-# 根据物流分类筛选
 if selected_status != "全部":
-
     filtered_df = filtered_df[
         filtered_df["物流分类"] == selected_status
     ]
 
 
-# 根据下单日期筛选
-if (
-    isinstance(date_range, (tuple, list))
-    and len(date_range) == 2
-    and date_range[0] is not None
-    and date_range[1] is not None
-):
-
-    start_date = pd.Timestamp(
-        date_range[0]
-    )
-
-    end_date = (
-        pd.Timestamp(date_range[1])
-        + pd.Timedelta(days=1)
-    )
+if date_range and len(date_range) == 2:
+    start_date, end_date = date_range
 
     filtered_df = filtered_df[
-        (
-            filtered_df["order_purchase_timestamp"]
-            >= start_date
-        )
-        &
-        (
-            filtered_df["order_purchase_timestamp"]
-            < end_date
+        filtered_df[purchase_col].dt.date.between(
+            start_date,
+            end_date
         )
     ]
 
 
-# 根据订单编号搜索
-if search_order.strip():
-
+if overdue_only:
     filtered_df = filtered_df[
-        filtered_df["order_id"].str.contains(
-            search_order.strip(),
-            case=False,
-            na=False,
-            regex=False
-        )
+        filtered_df["是否超时"]
     ]
 
 
-# 只查看逾期订单
-if only_overdue:
-
+if order_keyword:
     filtered_df = filtered_df[
-        filtered_df["是否逾期"]
+        filtered_df["order_id"]
+        .astype(str)
+        .str.contains(order_keyword, case=False, na=False)
     ]
 
 
 # =====================================================
-# 9. 顶部 KPI 指标卡片
+# 9. 关键指标
 # =====================================================
+
+st.subheader("📊 订单运营概览")
 
 total_orders = len(df)
 
-pending_orders = int(
-    (df["物流分类"] == "待发货").sum()
-)
-
-shipped_orders = int(
-    (df["物流分类"] == "已发货").sum()
-)
-
-delivered_orders = int(
-    (df["物流分类"] == "已送达").sum()
-)
-
-canceled_orders = int(
-    (df["物流分类"] == "已取消").sum()
-)
-
-overdue_orders = int(
-    df["是否逾期"].sum()
-)
-
-
-st.subheader("📊 订单运营总览")
+pending_orders = (df["物流分类"] == "待发货").sum()
+shipped_orders = (df["物流分类"] == "已发货").sum()
+delivered_orders = (df["物流分类"] == "已送达").sum()
+canceled_orders = (df["物流分类"] == "已取消").sum()
+overdue_orders = df["是否超时"].sum()
 
 col1, col2, col3 = st.columns(3)
 
-col1.metric(
-    "📦 订单总数",
-    f"{total_orders:,}"
-)
-
-col2.metric(
-    "🟠 待发货订单",
-    f"{pending_orders:,}"
-)
-
-col3.metric(
-    "🚚 已发货订单",
-    f"{shipped_orders:,}"
-)
-
+col1.metric("📦 订单总量", f"{total_orders:,}")
+col2.metric("🕒 待发货", f"{pending_orders:,}")
+col3.metric("🚚 已发货", f"{shipped_orders:,}")
 
 col4, col5, col6 = st.columns(3)
 
-col4.metric(
-    "✅ 已送达订单",
-    f"{delivered_orders:,}"
-)
-
-col5.metric(
-    "❌ 已取消订单",
-    f"{canceled_orders:,}"
-)
-
-col6.metric(
-    "⚠️ 逾期未送达",
-    f"{overdue_orders:,}"
-)
-
-
-st.info(
-    f"当前筛选条件下共有 "
-    f"{len(filtered_df):,} 笔订单。"
-)
+col4.metric("✅ 已送达", f"{delivered_orders:,}")
+col5.metric("❌ 已取消", f"{canceled_orders:,}")
+col6.metric("⚠️ 超时订单", f"{overdue_orders:,}")
 
 st.markdown("---")
 
 
 # =====================================================
-# 10. 订单状态分析图表
+# 10. 订单状态分布图
 # =====================================================
 
 st.subheader("📈 订单状态分析")
 
 chart_col1, chart_col2 = st.columns(2)
 
+status_counts = (
+    df["物流分类"]
+    .value_counts()
+    .rename_axis("物流状态")
+    .reset_index(name="订单数量")
+)
 
-# 物流分类饼图
 with chart_col1:
-
-    status_count = (
-        df["物流分类"]
-        .value_counts()
-        .reset_index()
-    )
-
-    status_count.columns = [
-        "物流分类",
-        "订单数量"
-    ]
-
     fig_pie = px.pie(
-        status_count,
-        names="物流分类",
+        status_counts,
+        names="物流状态",
         values="订单数量",
-        title="订单物流分类占比",
+        title="订单物流状态占比",
         hole=0.4
-    )
-
-    fig_pie.update_traces(
-        textinfo="percent+label"
     )
 
     st.plotly_chart(
@@ -499,31 +321,17 @@ with chart_col1:
     )
 
 
-# 原始订单状态柱状图
 with chart_col2:
-
-    original_count = (
-        df["原始订单状态"]
-        .value_counts()
-        .reset_index()
-    )
-
-    original_count.columns = [
-        "原始订单状态",
-        "订单数量"
-    ]
-
     fig_bar = px.bar(
-        original_count,
-        x="原始订单状态",
+        status_counts,
+        x="物流状态",
         y="订单数量",
-        title="原始订单状态分布",
+        title="各状态订单数量",
         text="订单数量"
     )
 
-    fig_bar.update_layout(
-        xaxis_title="订单状态",
-        yaxis_title="订单数量"
+    fig_bar.update_traces(
+        textposition="outside"
     )
 
     st.plotly_chart(
@@ -538,101 +346,87 @@ with chart_col2:
 
 st.subheader("📅 每月订单趋势")
 
-monthly_data = df.dropna(
-    subset=["order_purchase_timestamp"]
+monthly_df = df.dropna(
+    subset=[purchase_col]
 ).copy()
 
-monthly_data["月份"] = (
-    monthly_data["order_purchase_timestamp"]
+monthly_df["下单月份"] = (
+    monthly_df[purchase_col]
     .dt.to_period("M")
     .astype(str)
 )
 
-monthly_count = (
-    monthly_data.groupby("月份")
+monthly_counts = (
+    monthly_df.groupby("下单月份")
     .size()
     .reset_index(name="订单数量")
+    .sort_values("下单月份")
 )
 
-fig_line = px.line(
-    monthly_count,
-    x="月份",
-    y="订单数量",
-    markers=True,
-    title="每月订单数量变化"
-)
+if not monthly_counts.empty:
+    fig_monthly = px.line(
+        monthly_counts,
+        x="下单月份",
+        y="订单数量",
+        markers=True,
+        title="每月下单量变化"
+    )
 
-fig_line.update_layout(
-    xaxis_title="月份",
-    yaxis_title="订单数量"
-)
+    st.plotly_chart(
+        fig_monthly,
+        use_container_width=True
+    )
+else:
+    st.info("没有可用于生成月度趋势图的日期数据。")
 
-st.plotly_chart(
-    fig_line,
-    use_container_width=True
-)
-
-
-# =====================================================
-# 12. 订单名单展示
-# =====================================================
 
 st.markdown("---")
 
-st.subheader("📋 订单名单管理")
+
+# =====================================================
+# 12. 订单明细表
+# =====================================================
+
+st.subheader("📋 订单明细")
 
 st.write(
-    "在左侧选择订单分类、日期范围，"
-    "或者输入订单编号，即可查看对应的订单名单。"
+    f"当前筛选条件下共有 **{len(filtered_df):,}** 条订单。"
 )
-
 
 display_columns = [
     "order_id",
-    "customer_id",
-    "原始订单状态",
     "物流分类",
+    "order_status",
     "order_purchase_timestamp",
+    "order_approved_at",
     "order_delivered_carrier_date",
-    "order_estimated_delivery_date",
     "order_delivered_customer_date",
-    "是否逾期"
+    "order_estimated_delivery_date",
+    "是否超时"
 ]
 
-display_df = filtered_df[
-    display_columns
-].copy()
+display_columns = [
+    col for col in display_columns
+    if col in filtered_df.columns
+]
 
+display_df = filtered_df[display_columns].copy()
 
-# 修改列名为中文
+rename_columns = {
+    "order_id": "订单编号",
+    "物流分类": "物流分类",
+    "order_status": "原始订单状态",
+    "order_purchase_timestamp": "下单时间",
+    "order_approved_at": "订单批准时间",
+    "order_delivered_carrier_date": "交给物流时间",
+    "order_delivered_customer_date": "客户签收时间",
+    "order_estimated_delivery_date": "预计送达时间",
+    "是否超时": "是否超时"
+}
+
 display_df = display_df.rename(
-    columns={
-        "order_id": "订单编号",
-        "customer_id": "客户编号",
-        "order_purchase_timestamp": "下单时间",
-        "order_delivered_carrier_date": "交给物流时间",
-        "order_estimated_delivery_date": "预计送达时间",
-        "order_delivered_customer_date": "实际送达时间",
-        "是否逾期": "是否逾期未送达"
-    }
+    columns=rename_columns
 )
-
-
-# 格式化日期
-date_columns = [
-    "下单时间",
-    "交给物流时间",
-    "预计送达时间",
-    "实际送达时间"
-]
-
-for col in date_columns:
-
-    display_df[col] = pd.to_datetime(
-        display_df[col],
-        errors="coerce"
-    ).dt.strftime("%Y-%m-%d %H:%M:%S")
-
 
 st.dataframe(
     display_df,
@@ -641,77 +435,46 @@ st.dataframe(
 )
 
 
-st.success(
-    f"已展示 {len(display_df):,} 笔订单。"
-)
-
-
 # =====================================================
-# 13. 导出 CSV 文件
+# 13. 下载筛选后的订单
 # =====================================================
+
+st.subheader("📥 导出订单数据")
 
 csv_data = display_df.to_csv(
-    index=False
-).encode("utf-8-sig")
-
+    index=False,
+    encoding="utf-8-sig"
+)
 
 st.download_button(
-    label="📥 下载当前订单名单 CSV",
+    label="下载当前筛选结果 CSV",
     data=csv_data,
-    file_name="olist_orders_filtered.csv",
+    file_name="olist_filtered_orders.csv",
     mime="text/csv"
 )
 
 
 # =====================================================
-# 14. 物流分类说明
+# 14. 说明
 # =====================================================
 
-with st.expander("📖 查看物流分类与数据说明"):
+st.markdown("---")
 
-    st.markdown(
-        """
-        ### 订单分类规则
+st.subheader("📌 指标说明")
 
-        **待发货：**
-        原始状态为 created、approved、processing
-        或 invoiced 的订单。
-
-        **已发货：**
-        原始状态为 shipped，或者已经存在物流交接时间，
-        但没有实际送达时间的订单。
-
-        **已送达：**
-        原始状态为 delivered 的订单。
-
-        **已取消：**
-        原始状态为 canceled 的订单。
-
-        **不可用：**
-        原始状态为 unavailable 的订单。
-
-        **其他状态：**
-        不符合以上分类规则的订单。
-
-        ### 逾期规则
-
-        对指定的未送达订单，如果预计送达日期早于
-        侧边栏设置的判断基准日期，则标记为逾期。
-
-        ### 数据来源
-
-        Olist Brazilian E-Commerce Public Dataset。
-
-        ### 注意事项
-
-        本数据集是历史订单数据，不是实时物流接口。
-        「待发货」是本 Dashboard 定义的管理分类，
-        并不代表订单已经完成付款。
-        """
-    )
-
+st.markdown(
+    """
+    - **待发货：** 尚未记录交给物流的订单，且订单状态属于创建、
+      批准、处理中或已开票等状态。
+    - **已发货：** 已记录交给物流的时间，但尚未记录客户签收时间。
+    - **已送达：** 原始订单状态为 delivered，或已记录客户签收时间。
+    - **已取消：** 原始订单状态为 canceled。
+    - **超时订单：** 已超过预计送达日期，但尚未记录客户签收时间的订单。
+    - **注意：** 本数据集是历史订单数据，超时判断基于当前电脑日期，
+      不能代表实时物流状态。
+    """
+)
 
 st.caption(
-    "Olist 电商订单管理系统 | "
-    "Streamlit + Pandas + Plotly"
+    "数据来源：Olist Brazilian E-Commerce Public Dataset"
 )
